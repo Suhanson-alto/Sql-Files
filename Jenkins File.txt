@@ -1,0 +1,97 @@
+/*
+Pre-requisites
+Jenkins agent must have plugin:
+
+SQLCMD installed (it comes with SQL Server tools).
+
+Access to your target SQL Server instance.
+
+*/
+
+
+
+pipeline {
+    agent any
+
+    environment {
+        // Change these as per your setup
+        SQL_SERVER = 'YOUR_SQL_SERVER_HOST'      // e.g. localhost or MyServer\SQLEXPRESS
+        SQL_DB     = 'YOUR_DATABASE_NAME'
+        SQL_USER   = 'YOUR_SQL_USERNAME'
+        SQL_PASS   = 'YOUR_SQL_PASSWORD'
+
+        SQL_FOLDER = 'C:\\DatabaseScripts'       // Folder containing .sql files
+        LOG_DIR    = "${WORKSPACE}\\logs"        // Jenkins workspace log folder
+    }
+
+    stages {
+        stage('Prepare Logs Folder') {
+            steps {
+                // Create logs folder if it doesn't exist
+                bat '''
+                    if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+                '''
+            }
+        }
+
+        stage('Execute SQL Scripts') {
+            steps {
+                script {
+                    // Get all .sql files in the folder
+                    def sqlFiles = bat(
+                        script: "for %f in (\"${env.SQL_FOLDER}\\*.sql\") do @echo %f",
+                        returnStdout: true
+                    ).trim().split("\\r?\\n")
+
+                    echo "Found SQL files: ${sqlFiles}"
+
+                    // Execute each SQL file one by one
+                    sqlFiles.each { file ->
+                        def fileName = file.tokenize('\\\\')[-1]
+                        def logFile = "${LOG_DIR}\\${fileName.replace('.sql', '.log')}"
+
+                        echo "-----------------------------------------------"
+                        echo "Executing SQL script: ${file}"
+                        echo "Log file: ${logFile}"
+                        echo "-----------------------------------------------"
+
+                        // Run sqlcmd and log output
+                        def status = bat(
+                            script: """
+                                sqlcmd -S ${SQL_SERVER} -d ${SQL_DB} -U ${SQL_USER} -P ${SQL_PASS} ^
+                                -i "${file}" -o "${logFile}" 2>&1
+                                if errorlevel 1 exit /b 1
+                            """,
+                            returnStatus: true
+                        )
+
+                        // Check if the script succeeded or failed
+                        if (status != 0) {
+                            echo "ERROR executing ${file}. Check ${logFile} for details."
+                        } else {
+                            echo "Successfully executed ${file}."
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Summary') {
+            steps {
+                bat '''
+                    echo ==========================================
+                    echo SQL Script Execution Logs:
+                    dir "%LOG_DIR%"
+                    echo ==========================================
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline complete. Logs archived below."
+            archiveArtifacts artifacts: 'logs/*.log', fingerprint: true
+        }
+    }
+}
