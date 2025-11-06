@@ -1,0 +1,105 @@
+/*
+Step 1: Create Credentials in Jenkins
+
+Go to Jenkins Dashboard → Manage Jenkins → Credentials
+
+Choose your scope (e.g. Global or specific folder/job)
+
+Click Add Credentials
+
+Choose:
+
+Kind → Username with password
+
+ID → sql-db-creds (you can use any ID name)
+
+Username → your SQL username
+
+Password → your SQL password
+
+*/
+
+----------------------------------------------------------------------------------------------------------------------------------------
+
+pipeline {
+    agent any
+
+    environment {
+        SQL_SERVER = 'YOUR_SQL_SERVER_HOST'      // e.g. localhost or MyServer\SQLEXPRESS
+        SQL_DB     = 'YOUR_DATABASE_NAME'
+        SQL_FOLDER = 'C:\\DatabaseScripts'       // Folder containing .sql files
+        LOG_DIR    = "${WORKSPACE}\\logs"
+    }
+
+    stages {
+        stage('Prepare Logs Folder') {
+            steps {
+                bat '''
+                    if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+                '''
+            }
+        }
+
+        stage('Execute SQL Scripts') {
+            steps {
+                // Use Jenkins credentials securely
+                withCredentials([usernamePassword(credentialsId: 'sql-db-creds', usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASS')]) {
+                    script {
+                        // Get all .sql files in the folder
+                        def sqlFiles = bat(
+                            script: "for %f in (\"${env.SQL_FOLDER}\\*.sql\") do @echo %f",
+                            returnStdout: true
+                        ).trim().split("\\r?\\n")
+
+                        echo "Found SQL files: ${sqlFiles}"
+
+                        // Execute each SQL file sequentially
+                        sqlFiles.each { file ->
+                            def fileName = file.tokenize('\\\\')[-1]
+                            def logFile = "${LOG_DIR}\\${fileName.replace('.sql', '.log')}"
+
+                            echo "-----------------------------------------------"
+                            echo "Executing SQL script: ${file}"
+                            echo "Log file: ${logFile}"
+                            echo "-----------------------------------------------"
+
+                            // Execute using sqlcmd
+                            def status = bat(
+                                script: """
+                                    sqlcmd -S ${SQL_SERVER} -d ${SQL_DB} -U %SQL_USER% -P %SQL_PASS% ^
+                                    -i "${file}" -o "${logFile}" 2>&1
+                                    if errorlevel 1 exit /b 1
+                                """,
+                                returnStatus: true
+                            )
+
+                            if (status != 0) {
+                                echo "❌ ERROR executing ${file}. Check ${logFile} for details."
+                            } else {
+                                echo "✅ Successfully executed ${file}."
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Summary') {
+            steps {
+                bat '''
+                    echo ==========================================
+                    echo SQL Script Execution Logs:
+                    dir "%LOG_DIR%"
+                    echo ==========================================
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline complete. Logs archived below."
+            archiveArtifacts artifacts: 'logs/*.log', fingerprint: true
+        }
+    }
+}
